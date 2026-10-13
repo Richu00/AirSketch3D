@@ -1,0 +1,91 @@
+{
+ "gestures": [
+  {
+   "name": "INDEX_POINT",
+   "description": "Index finger only",
+   "action": "Cursor control"
+  },
+  {
+   "name": "PINCH",
+   "description": "Thumb tip touches index tip",
+   "action": "Click / select (once per pinch)"
+  },
+  {
+   "name": "FIST",
+   "description": "All fingers closed, thumb tucked",
+   "action": "Left click"
+  },
+  {
+   "name": "OPEN_PALM",
+   "description": "All fingers extended",
+   "action": "Activate / resume"
+  },
+  {
+   "name": "PEACE",
+   "description": "Index and middle extended",
+   "action": "Browser mode"
+  },
+  {
+   "name": "THUMBS_UP",
+   "description": "Thumb up, four fingers folded",
+   "action": "Application launcher"
+  },
+  {
+   "name": "THUMBS_DOWN",
+   "description": "Thumb down, four fingers folded",
+   "action": "Cancel / exit current mode"
+  },
+  {
+   "name": "SCREENSHOT",
+   "description": "ILY: thumb + index + pinky extended, middle + ring folded",
+   "action": "Screenshot"
+  },
+  {
+   "name": "SWIPE_LEFT",
+   "description": "Fast horizontal move left",
+   "action": "Previous"
+  },
+  {
+   "name": "SWIPE_RIGHT",
+   "description": "Fast horizontal move right",
+   "action": "Next"
+  },
+  {
+   "name": "VERTICAL_SCROLL",
+   "description": "Index finger vertical motion",
+   "action": "Scroll"
+  },
+  {
+   "name": "PINCH_DRAG",
+   "description": "Pinch held while moving",
+   "action": "Drag"
+  }
+ ],
+ "sketch_mode": [
+  {
+   "name": "INDEX_POINT",
+   "description": "1 finger (index only)",
+   "action": "Draw"
+  },
+  {
+   "name": "PEACE",
+   "description": "2 fingers (index + middle)",
+   "action": "Erase"
+  },
+  {
+   "name": "OPEN_PALM",
+   "description": "5 fingers",
+   "action": "Pause drawing"
+  },
+  {
+   "name": "FIST",
+   "description": "Closed fist, hold ~0.7 s",
+   "action": "Generate 3D model"
+  },
+  {
+   "name": "THUMBS_DOWN",
+   "description": "Thumb down",
+   "action": "Exit sketch mode"
+  }
+ ]
+}

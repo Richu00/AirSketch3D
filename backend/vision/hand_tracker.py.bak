@@ -1,0 +1,112 @@
+"""Hand tracking. Works with both MediaPipe APIs:
+
+* mediapipe 0.10.x  -> classic `mp.solutions.hands`   (nothing to download)
+* mediapipe 1.x     -> Tasks API HandLandmarker        (needs models/hand_landmarker.task)
+
+process(frame, draw) returns (points, handedness) where points is a list of 21 [x, y, z]
+normalised landmarks (empty list when no hand is visible).
+"""
+import time
+from pathlib import Path
+
+import cv2
+import mediapipe as mp
+
+MODEL_FILE = Path(__file__).resolve().parents[2] / "models" / "hand_landmarker.task"
+
+CONNECTIONS = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (5, 9), (9, 10), (10, 11),
+               (11, 12), (9, 13), (13, 14), (14, 15), (15, 16), (13, 17), (17, 18), (18, 19), (19, 20), (0, 17)]
+
+
+class HandTracker:
+    def __init__(self, min_detection=0.6, min_tracking=0.6):
+        self.last_hands = []
+        self.last_handedness = []
+        self.legacy = hasattr(mp, "solutions")
+        if self.legacy:
+            self.mp_hands = mp.solutions.hands
+            self.drawer = mp.solutions.drawing_utils
+            self.hands = self.mp_hands.Hands(static_image_mode=False, max_num_hands=2, model_complexity=1,
+                                             min_detection_confidence=min_detection,
+                                             min_tracking_confidence=min_tracking)
+        else:
+            self._init_tasks(min_detection, min_tracking)
+
+    # ------------------------------------------------------------ Tasks API
+    def _init_tasks(self, min_detection, min_tracking):
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision
+        if not MODEL_FILE.exists():
+            raise FileNotFoundError(
+                f"{MODEL_FILE} not found. This MediaPipe version needs the hand model file - download it with:\n"
+                "curl -L -o models/hand_landmarker.task https://storage.googleapis.com/mediapipe-models/"
+                "hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task\n"
+                "(or install mediapipe==0.10.14, which needs no model file).")
+        options = vision.HandLandmarkerOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_FILE),
+                                               delegate=mp_python.BaseOptions.Delegate.CPU),
+            running_mode=vision.RunningMode.VIDEO, num_hands=2,
+            min_hand_detection_confidence=min_detection, min_hand_presence_confidence=min_tracking,
+            min_tracking_confidence=min_tracking)
+        self.landmarker = vision.HandLandmarker.create_from_options(options)
+        self._t0, self._last_ts = time.time(), -1
+
+    def _process_tasks(self, frame, draw):
+        import numpy as np
+        rgb = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        ts = max(int((time.time() - self._t0) * 1000), self._last_ts + 1)
+        self._last_ts = ts
+        res = self.landmarker.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), ts)
+        if not res.hand_landmarks:
+            self.last_hands = []
+            self.last_handedness = []
+            return [], "Right"
+        hands = []
+        handedness = []
+        for i, hand in enumerate(res.hand_landmarks[:2]):
+            pts = [[float(p.x), float(p.y), float(p.z)] for p in hand]
+            label = "Right"
+            if res.handedness and i < len(res.handedness) and res.handedness[i]:
+                label = res.handedness[i][0].category_name
+            hands.append(pts); handedness.append(label)
+        order = sorted(range(len(hands)), key=lambda i: hands[i][0][0])
+        hands = [hands[i] for i in order]; handedness = [handedness[i] for i in order]
+        self.last_hands, self.last_handedness = hands, handedness
+        points = hands[0]
+        handed = handedness[0] if handedness else "Right"
+        if draw:
+            h, w = frame.shape[:2]
+            for hand_points in hands:
+                px = [(int(x * w), int(y * h)) for x, y, _ in hand_points]
+                for a, b in CONNECTIONS:
+                    cv2.line(frame, px[a], px[b], (0, 200, 0), 2)
+                for point in px:
+                    cv2.circle(frame, point, 4, (0, 0, 255), -1)
+        return points, handed
+
+    # ------------------------------------------------------------- public
+    def process(self, frame, draw=True):
+        if not self.legacy:
+            return self._process_tasks(frame, draw)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        result = self.hands.process(rgb)
+        hands = list(result.multi_hand_landmarks or [])[:2]
+        labels = []
+        if result.multi_handedness:
+            labels = [c.classification[0].label for c in result.multi_handedness[:2]]
+        pairs = list(zip(hands, labels or ["Right"] * len(hands)))
+        pairs.sort(key=lambda pair: pair[0].landmark[0].x)
+        self.last_hands = [[[float(p.x), float(p.y), float(p.z)] for p in hand.landmark] for hand, _ in pairs]
+        self.last_handedness = [label for _, label in pairs]
+        points = self.last_hands[0] if self.last_hands else []
+        handedness = self.last_handedness[0] if self.last_handedness else "Right"
+        if draw:
+            for hand, _ in pairs:
+                self.drawer.draw_landmarks(frame, hand, self.mp_hands.HAND_CONNECTIONS)
+        return points, handedness
+
+    def close(self):
+        if self.legacy:
+            self.hands.close()
+        else:
+            self.landmarker.close()

@@ -1,0 +1,68 @@
+{
+  "gesture": {
+    "confidence_threshold": 0.85,
+    "stabilization_frames": 6,
+    "cooldown_ms": 800,
+    "sensitivity": 1.0
+  },
+  "cursor": {
+    "sensitivity": 1.5,
+    "smoothing": 0.72,
+    "invert_x": false,
+    "invert_y": false
+  },
+  "camera": {
+    "camera_index": 0,
+    "width": 960,
+    "height": 540,
+    "mirror": true,
+    "show_landmarks": true,
+    "show_fps": true
+  },
+  "recognition": {
+    "pinch_threshold": 0.3,
+    "pinch_release": 0.42,
+    "finger_extended_ratio": 1.2,
+    "finger_folded_ratio": 1.0,
+    "thumb_extended_ratio": 0.9,
+    "thumb_folded_ratio": 0.72,
+    "swipe_min_distance": 0.28,
+    "swipe_cooldown_ms": 700,
+    "scroll_min_speed": 0.55
+  },
+  "media": {
+    "volume_steps": 5,
+    "exit_hold_ms": 1500
+  },
+  "launcher": {
+    "columns": 3
+  },
+  "actions": {
+    "gesture_mappings": {
+      "INDEX_POINT": "cursor_control",
+      "PINCH": "select_click",
+      "FIST": "left_click",
+      "OPEN_PALM": "resume",
+      "PEACE": "browser_mode",
+      "THUMBS_UP": "app_launcher",
+      "THUMBS_DOWN": "cancel_exit",
+      "SWIPE_LEFT": "previous",
+      "SWIPE_RIGHT": "next",
+      "VERTICAL_SCROLL": "scroll",
+      "PINCH_DRAG": "drag",
+      "SCREENSHOT": "screenshot"
+    }
+  },
+  "sketch": {
+    "extrude_height": 0.6,
+    "fist_hold_ms": 700,
+    "erase_radius": 0.06,
+    "min_points": 15,
+    "resample_points": 96,
+    "use_ml": false,
+    "gesture_history": 5,
+    "gesture_hold_frames": 2,
+    "close_snap_distance": 0.05,
+    "min_component_area": 0.0015
+  }
+}

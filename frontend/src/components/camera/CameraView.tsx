@@ -1,0 +1,116 @@
+import { useEffect, useRef, useState } from 'react';
+import { ScanLine } from 'lucide-react';
+import { useStore } from '../../store/useStore';
+import { API_BASE } from '../../config';
+import { gestureMeta } from '../../lib/gestures';
+
+const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+export function CameraView() {
+  const { systemState, settings, connectionStatus } = useStore();
+  const [feedError, setFeedError] = useState(false);
+  // The overlay must sit exactly on the video. The <img> is letterboxed (object-contain) inside the panel,
+  // so we size one wrapper to the video's real aspect ratio and draw both the picture and the SVG inside it.
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  const [videoAspect, setVideoAspect] = useState<number | null>(null);
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    const measure = () => setBox({ w: el.clientWidth, h: el.clientHeight });
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const ar = videoAspect ?? (settings.camera.width / Math.max(1, settings.camera.height) || 16 / 9);
+  const fitW = Math.max(0, Math.min(box.w, box.h * ar));
+  const fitH = fitW / ar;
+  const g = gestureMeta(systemState.gesture);
+  const pct = Math.round(systemState.confidence * 100);
+  const hasHand = systemState.hand_detected;
+  const lm = systemState.landmarks;
+  const sketching = systemState.mode === 'SKETCH';
+  const strokes = systemState.sketch_strokes ?? [];
+  const erasing = sketching && systemState.sketch?.gesture === 'ERASE' && lm.length === 21;
+  const noFeed = feedError || connectionStatus !== 'connected';
+  const hint = sketching ? systemState.sketch?.close_hint : null;
+  const isClosed = (st: [number, number][]) => st.length > 2 && st[0][0] === st[st.length - 1][0] && st[0][1] === st[st.length - 1][1];
+
+  return (
+    <div className={`glass-panel rounded-2xl overflow-hidden h-full min-h-[240px] hud-corners relative transition-shadow duration-300 ${hasHand ? 'shadow-glow-cyan' : ''}`}>
+      <div className="absolute top-3 left-4 z-10 flex items-center gap-2 text-[10px] tracking-[.2em] text-cyan-300">
+        <ScanLine size={14} /> LIVE VISION
+      </div>
+      <div className="absolute top-3 right-4 z-10 flex gap-2">
+        {settings.camera.show_fps && <span className="px-2 py-1 rounded bg-black/50 text-[9px] text-slate-400 font-mono">{systemState.fps.toFixed(0)} FPS{systemState.track_ms ? ` · ${systemState.track_ms.toFixed(0)} ms` : ''}</span>}
+        <span className={`px-2 py-1 rounded text-[9px] tracking-wider ${hasHand ? 'bg-emerald-400/10 text-emerald-300' : 'bg-rose-400/10 text-rose-300'}`}>
+          {hasHand ? 'HAND LOCKED' : 'SEARCHING'}
+        </span>
+      </div>
+
+      <div ref={boxRef} className="absolute inset-0 bg-[#020611] flex items-center justify-center">
+        <div className="relative" style={{ width: fitW || '100%', height: fitW ? fitH : '100%' }}>
+          <img
+            src={`${API_BASE}/video_feed`}
+            alt="Camera feed"
+            onError={() => setFeedError(true)}
+            onLoad={(e) => {
+              setFeedError(false);
+              const im = e.currentTarget;
+              if (im.naturalWidth > 0 && im.naturalHeight > 0) setVideoAspect(im.naturalWidth / im.naturalHeight);
+            }}
+            className={`absolute inset-0 w-full h-full object-fill transition-opacity duration-500 ${noFeed ? 'opacity-0' : 'opacity-80'}`}
+          />
+          {/* viewBox is (aspect x 1) so x/y scale equally: circles stay round and the overlay matches the video pixel-for-pixel */}
+          <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox={`0 0 ${ar} 1`} preserveAspectRatio="none">
+            {sketching && strokes.map((st, i) => {
+              const pts = st.map((p) => `${p[0] * ar},${p[1]}`).join(' ');
+              return isClosed(st)
+                ? <polygon key={i} points={pts} fill="rgba(52,211,153,.14)" stroke="#34d399" strokeWidth=".007" strokeLinejoin="round" opacity=".95" />
+                : <polyline key={i} points={pts} fill="none" stroke="#e879f9" strokeWidth=".007" strokeLinecap="round" strokeLinejoin="round" opacity=".95" />;
+            })}
+            {hint && (
+              <g>
+                <circle cx={hint.x * ar} cy={hint.y} r={hint.r} fill={hint.near ? 'rgba(52,211,153,.18)' : 'none'}
+                  stroke={hint.near ? '#34d399' : '#e879f9'} strokeWidth=".004" strokeDasharray=".014 .01" opacity={hint.near ? 1 : 0.65} />
+                <circle cx={hint.x * ar} cy={hint.y} r=".007" fill={hint.near ? '#34d399' : '#e879f9'} />
+              </g>
+            )}
+            {erasing && <circle cx={lm[8][0] * ar} cy={lm[8][1]} r={systemState.sketch?.erase_radius ?? 0.06} fill="rgba(244,63,94,.12)" stroke="#f43f5e" strokeWidth=".004" />}
+            {lm.length === 21 && connections.map(([a, b], i) => (
+              <line key={i} x1={lm[a][0] * ar} y1={lm[a][1]} x2={lm[b][0] * ar} y2={lm[b][1]} stroke="#00d4ff" strokeWidth=".004" opacity=".7" />
+            ))}
+            {lm.map((p, i) => <circle key={i} cx={p[0] * ar} cy={p[1]} r=".008" fill={i === 8 ? '#10b981' : '#00d4ff'} className="landmark-dot" />)}
+          </svg>
+        </div>
+        {noFeed && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-6">
+            <div className="text-slate-500 text-xs tracking-[.25em]">{connectionStatus === 'connected' ? 'WAITING FOR CAMERA' : 'BACKEND OFFLINE'}</div>
+            <div className="text-slate-600 text-[11px] mt-2">
+              {connectionStatus === 'connected' ? 'Press ACTIVATE if tracking is disabled.' : 'Run start_backend.bat (Windows) or ./start_backend.sh (Mac) - http://127.0.0.1:8000.'}
+            </div>
+          </div>
+        )}
+        <div className="scan-line" />
+      </div>
+
+      {/* live gesture read-out */}
+      <div className="absolute bottom-10 left-4 z-10 flex items-center gap-3 glass-card rounded-xl pl-3 pr-4 py-2 border-cyan-400/20">
+        <span key={systemState.gesture} className="text-2xl leading-none gesture-pop">{g.emoji}</span>
+        <div>
+          <div className="text-xs font-semibold tracking-wider">{g.label.toUpperCase()}</div>
+          <div className="mt-1 flex items-center gap-2">
+            <div className="w-20 h-1 bg-slate-800 rounded"><div className="confidence-bar" style={{ width: `${pct}%` }} /></div>
+            <span className="text-[9px] text-cyan-300 font-mono">{pct}%</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="absolute bottom-3 left-4 right-4 flex justify-between text-[9px] text-slate-500 tracking-widest">
+        <span>MEDIAPIPE / 21 LANDMARKS</span>
+        <span>{settings.camera.mirror ? 'MIRRORED' : 'RAW'} • {settings.camera.width}×{settings.camera.height}</span>
+      </div>
+    </div>
+  );
+}

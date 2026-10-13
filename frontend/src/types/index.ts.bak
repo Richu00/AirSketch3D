@@ -1,0 +1,193 @@
+// ── Core System State ──────────────────────────────────────────────────────
+export type Mode = 'DESKTOP' | 'BROWSER' | 'APPS' | 'MEDIA' | 'SKETCH';
+
+export interface LauncherState {
+  open: boolean;
+  items: string[];
+  hover_index: number;          // -1 = nothing hovered
+  pointer: [number, number] | null;   // 0..1 position of the fingertip over the launcher grid
+  columns: number;
+}
+
+// ── Sketch 3D (air-draw -> extruded 3D model) ──────────────────────────────
+export type SketchGesture = 'DRAW' | 'ERASE' | 'PAUSE' | 'FIST' | 'OTHER' | 'NONE';
+export type SketchControlMode = 'DRAW' | 'MOUSE';
+
+export interface SketchState {
+  gesture: SketchGesture;
+  points: number;
+  version: number;
+  fist_progress: number;        // 0..1 while the fist is held
+  erase_radius: number;         // fraction of frame height
+  has_model: boolean;
+  model_id: number;
+  ml_active: boolean;
+  closed_strokes: number;
+  inspection: SketchInspection;
+  control_mode: SketchControlMode;
+}
+
+export interface SketchInspection {
+  inspecting: boolean;
+  solid: boolean;
+  rotation: [number, number, number];
+  pan: [number, number];
+  zoom: number;
+}
+
+export interface SketchModel {
+  id: number;
+  outline: [number, number][];
+  outlines?: [number, number][][];
+  height: number;
+}
+
+export interface SystemState {
+  hand_detected: boolean;
+  landmarks: [number, number, number][];
+  gesture: string;
+  confidence: number;
+  fps: number;
+  mode: Mode;
+  action: string;
+  system_status: 'ACTIVE' | 'PAUSED' | 'OFFLINE';
+  is_running: boolean;
+  is_paused: boolean;
+  gesture_state: 'IDLE' | 'DETECTING' | 'CONFIRMED' | 'HELD' | 'COOLDOWN';
+  scroll_direction: 'UP' | 'DOWN' | null;
+  cursor_position: [number, number] | null;
+  launcher?: LauncherState;
+  sketch?: SketchState;
+  sketch_strokes?: [number, number][][];   // sent only when they change
+  sketch_model?: SketchModel | null;       // sent only when they change
+  hands?: [number, number, number][][][];
+}
+
+// ── Action History ─────────────────────────────────────────────────────────
+export interface ActionRecord {
+  id: string;
+  timestamp: Date;
+  gesture: string;
+  action: string;
+  confidence: number;
+  mode: string;
+}
+
+// ── Application / Website ──────────────────────────────────────────────────
+export interface Application {
+  name: string;
+  path: string;
+  icon: string;
+  gesture: string | null;
+}
+
+export interface Website {
+  name: string;
+  url: string;
+  icon: string;
+  gesture: string | null;
+}
+
+// ── Settings ───────────────────────────────────────────────────────────────
+export interface GestureSettings {
+  confidence_threshold: number;
+  stabilization_frames: number;
+  cooldown_ms: number;
+  sensitivity: number;
+}
+
+export interface CursorSettings {
+  sensitivity: number;
+  smoothing: number;
+  invert_x: boolean;
+  invert_y: boolean;
+}
+
+export interface CameraSettings {
+  camera_index: number;
+  width: number;
+  height: number;
+  mirror: boolean;
+  show_landmarks: boolean;
+  show_fps: boolean;
+}
+
+export interface SketchSettings {
+  extrude_height: number;
+  fist_hold_ms: number;
+  erase_radius: number;
+  min_points: number;
+  resample_points: number;
+  gesture_history?: number;
+  gesture_hold_frames?: number;
+  close_snap_distance?: number;
+  min_component_area?: number;
+}
+
+export interface ActionSettings {
+  gesture_mappings: Record<string, string>;
+}
+
+export interface Settings {
+  recognition?: Record<string, number>;
+  gesture: GestureSettings;
+  cursor: CursorSettings;
+  camera: CameraSettings;
+  actions: ActionSettings;
+  sketch?: SketchSettings;
+}
+
+// ── Notifications ──────────────────────────────────────────────────────────
+export interface Notification {
+  id: string;
+  gesture: string;
+  action: string;
+  confidence: number;
+  timestamp: Date;
+}
+
+// ── WebSocket Messages ─────────────────────────────────────────────────────
+export interface WsStateUpdate {
+  type: 'state_update';
+  data: SystemState;
+}
+
+export interface WsActionEvent {
+  type: 'action_event';
+  data: {
+    gesture: string;
+    action: string;
+    confidence: number;
+    mode: string;
+    timestamp: string;
+  };
+}
+
+export interface WsNotification {
+  type: 'notification';
+  data: {
+    message: string;
+    level: 'info' | 'warning' | 'error';
+  };
+}
+
+export type WsMessage = WsStateUpdate | WsActionEvent | WsNotification;
+
+// ── Gesture Info ───────────────────────────────────────────────────────────
+export interface GestureInfo {
+  name: string;
+  description: string;
+  action: string;
+}
+
+// ── API Responses ──────────────────────────────────────────────────────────
+export interface ApiResponse<T = unknown> {
+  success: boolean;
+  data?: T;
+  message?: string;
+}
+
+export interface LaunchResult {
+  success: boolean;
+  message: string;
+}

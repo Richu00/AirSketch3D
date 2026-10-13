@@ -1,0 +1,95 @@
+﻿import cv2, time, platform, threading
+
+
+class Camera:
+    """Webcam reader.
+
+    A background thread keeps grabbing frames and only the newest one is kept, so
+    hand tracking never works on stale, buffered frames and capture overlaps with
+    processing (this is a big part of the FPS gain).  MJPG is requested because
+    many webcams are limited to 5-15 FPS at 960x540 in their default YUY2 mode.
+    """
+
+    def __init__(self, index=0, width=1280, height=720, mirror=True, exposure=None):
+        self.index = index; self.width = width; self.height = height; self.mirror = mirror
+        self.exposure = exposure          # Public API: None uses the optimized camera default; explicit values override it
+        self.cap = None; self.last_time = time.perf_counter(); self.fps = 0.0
+        self._cond = threading.Condition()
+        self._stop = threading.Event()
+        self._thread = None
+        self._frame = None; self._seq = 0; self._read_seq = 0
+
+    # ------------------------------------------------------------------ open
+    def open(self):
+        if self.cap is not None and self.cap.isOpened():
+            self._ensure_thread()
+            return True
+        backend = cv2.CAP_DSHOW if platform.system() == 'Windows' else 0
+        self.cap = cv2.VideoCapture(self.index, backend)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width); self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # This camera drops from ~30 FPS to ~15 FPS when auto-exposure lengthens the shutter.
+        # Keep the public exposure attribute optional, but use the measured fast default
+        # internally when no explicit override is supplied.
+        effective_exposure = -5.0 if self.exposure is None else float(self.exposure)
+        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)      # 0.25 = manual on DirectShow
+        self.cap.set(cv2.CAP_PROP_EXPOSURE, effective_exposure)
+        ok = bool(self.cap.isOpened())
+        if ok:
+            self._ensure_thread()
+        return ok
+
+    def _ensure_thread(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._reader, name='camera-reader', daemon=True)
+        self._thread.start()
+
+    def _reader(self):
+        fails = 0
+        while not self._stop.is_set():
+            cap = self.cap
+            if cap is None or not cap.isOpened():
+                break
+            ok, frame = cap.read()
+            if not ok:
+                fails += 1
+                if fails > 200:
+                    break
+                time.sleep(0.01)
+                continue
+            fails = 0
+            if self.mirror:
+                frame = cv2.flip(frame, 1)
+            with self._cond:
+                self._frame = frame; self._seq += 1
+                self._cond.notify_all()
+
+    # ------------------------------------------------------------------ read
+    def read(self, timeout=0.5):
+        """Newest unseen frame (waits up to `timeout`), or None if the camera is not delivering."""
+        if not self.open():
+            return None
+        with self._cond:
+            if self._seq == self._read_seq:
+                self._cond.wait(timeout)
+            if self._seq == self._read_seq:
+                return None
+            frame = self._frame; self._read_seq = self._seq
+        now = time.perf_counter(); dt = now - self.last_time; self.last_time = now
+        if dt > 0:
+            self.fps = 0.9 * self.fps + 0.1 * (1 / dt) if self.fps else 1 / dt
+        return frame
+
+    def release(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        self._thread = None
+        if self.cap is not None:
+            self.cap.release()
+        self.cap = None
+
+

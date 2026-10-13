@@ -1,0 +1,147 @@
+"""Pinch-free, sketch-specific hand pose recognition.
+
+The desktop recognizer deliberately supports pinch. Sketch mode uses a separate
+small classifier because pinch must never be a Sketch command and because a
+thumb position that is useful for desktop click detection should not turn a
+normal closed fist into THUMBS_UP while building a model.
+"""
+from collections import deque
+import numpy as np
+
+FINGER_CHAINS = ((5, 6, 7, 8), (9, 10, 11, 12), (13, 14, 15, 16), (17, 18, 19, 20))
+
+
+def _angle(a, b, c):
+    u = np.asarray(a, dtype=np.float32)[:2] - np.asarray(b, dtype=np.float32)[:2]
+    v = np.asarray(c, dtype=np.float32)[:2] - np.asarray(b, dtype=np.float32)[:2]
+    nu, nv = max(float(np.linalg.norm(u)), 1e-6), max(float(np.linalg.norm(v)), 1e-6)
+    return float(np.degrees(np.arccos(np.clip(float(np.dot(u, v) / (nu * nv)), -1.0, 1.0))))
+
+
+def finger_states(hand):
+    hand = np.asarray(hand, dtype=np.float32)
+    if hand.shape != (21, 3):
+        return np.zeros(4, dtype=bool)
+    result = []
+    for mcp, pip, dip, tip in FINGER_CHAINS:
+        pip_angle = _angle(hand[mcp], hand[pip], hand[dip])
+        dip_angle = _angle(hand[pip], hand[dip], hand[tip])
+        tip_mcp = np.linalg.norm(hand[tip, :2] - hand[mcp, :2])
+        pip_mcp = max(np.linalg.norm(hand[pip, :2] - hand[mcp, :2]), 1e-6)
+        tip_wrist = np.linalg.norm(hand[tip, :2] - hand[0, :2])
+        pip_wrist = max(np.linalg.norm(hand[pip, :2] - hand[0, :2]), 1e-6)
+        reach = tip_mcp / pip_mcp
+        wrist_reach = tip_wrist / pip_wrist
+        extended = (pip_angle >= 148 and dip_angle >= 142 and reach >= 1.22) or (pip_angle >= 155 and wrist_reach >= 1.18)
+        result.append(bool(extended))
+    return np.asarray(result, dtype=bool)
+
+
+def is_fist(hand):
+    hand = np.asarray(hand, dtype=np.float32)
+    up = finger_states(hand)
+    if np.any(up):
+        return False
+    curled = 0
+    for mcp, pip, dip, tip in FINGER_CHAINS:
+        tip_wrist = np.linalg.norm(hand[tip, :2] - hand[0, :2])
+        pip_wrist = max(np.linalg.norm(hand[pip, :2] - hand[0, :2]), 1e-6)
+        # Folded fingers bring the tip back toward the palm/wrist. This is
+        # robust to thumb position and avoids the old DRAW->FIST collision.
+        if tip_wrist / pip_wrist < 1.08:
+            curled += 1
+    return curled >= 3
+
+
+def classify_pose(hand):
+    if len(hand) != 21:
+        return "NONE"
+    up = finger_states(hand)
+    index, middle, ring, pinky = map(bool, up)
+    if is_fist(hand):
+        return "FIST"
+    if int(up.sum()) >= 3:
+        return "PAUSE"
+    if index and middle and not ring and not pinky:
+        return "ERASE"
+    if index and not middle and not ring and not pinky:
+        return "DRAW"
+    return "OTHER"
+
+
+class SketchGestureRecognizer:
+    """Stable Sketch pose detector with landmark smoothing and transition debouncing.
+
+    Sketch deliberately remains pinch-free. The general AIRCONTROL recognizer is
+    used only when Sketch is explicitly switched into MOUSE control mode.
+    """
+
+    def __init__(self, params=None, aspect=1.0, history=5, hold_frames=2):
+        self.history_size = max(3, int(history))
+        self.hold_frames = max(1, int(hold_frames))
+        self.reset()
+
+    def configure(self, params=None, aspect=None, history=None, hold_frames=None):
+        if history is not None:
+            self.history_size = max(3, int(history))
+        if hold_frames is not None:
+            self.hold_frames = max(1, int(hold_frames))
+        self.reset()
+
+    def reset(self):
+        self.history = deque(maxlen=getattr(self, 'history_size', 5))
+        self.stable = "OTHER"
+        self.bad_frames = 0
+        self._candidate = None
+        self._candidate_frames = 0
+        self._smoothed = None
+
+    def classify(self, points, now=None):
+        points = np.asarray(points, dtype=np.float32)
+        if points.shape != (21, 3):
+            self.reset()
+            return "NONE", 0.0
+
+        # MediaPipe jitter is especially visible at the fingertip. Smooth the
+        # landmarks before classifying so a single noisy frame cannot lift the
+        # pen, erase the drawing, or start a fist build.
+        alpha = 0.65
+        if self._smoothed is None:
+            self._smoothed = points.copy()
+        else:
+            self._smoothed = (1.0 - alpha) * self._smoothed + alpha * points
+
+        raw = classify_pose(self._smoothed)
+        self.history.append(raw)
+
+        if raw == self.stable:
+            self._candidate = None
+            self._candidate_frames = 0
+            self.bad_frames = 0
+            return self.stable, 1.0
+
+        if raw == "OTHER":
+            self.bad_frames += 1
+            if self.bad_frames <= max(self.hold_frames, 3):
+                return self.stable, 1.0
+            self._candidate = None
+            self._candidate_frames = 0
+            return "OTHER", 1.0
+
+        self.bad_frames = 0
+        if raw == self._candidate:
+            self._candidate_frames += 1
+        else:
+            self._candidate = raw
+            self._candidate_frames = 1
+
+        # Require a short consecutive run before changing command states.
+        # This prevents an OPEN_PALM/FIST transition from becoming stray DRAW points.
+        required = 1 if raw == "DRAW" else 2
+        if self._candidate_frames >= required:
+            self.stable = raw
+            self._candidate = None
+            self._candidate_frames = 0
+            return self.stable, 1.0
+        return "OTHER", 1.0
+

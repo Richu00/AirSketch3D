@@ -1,0 +1,83 @@
+"""Stateful hand-controlled 3D inspection for Sketch mode."""
+from __future__ import annotations
+
+import math
+import numpy as np
+
+
+class SketchInspector:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.inspecting = False
+        self.solid = False
+        self.rotation = [0.0, 0.0, 0.0]
+        self.pan = [0.0, 0.0]
+        self.zoom = 1.0
+        self._prev_one = None
+        self._prev_mid = None
+        self._prev_dist = None
+        self._prev_angle = None
+
+    def enter(self):
+        self.inspecting = True
+        self._clear_motion()
+        return self.inspecting
+
+    def exit(self):
+        self.inspecting = False
+        self._clear_motion()
+        return self.inspecting
+
+    def _clear_motion(self):
+        self._prev_one = self._prev_mid = self._prev_dist = self._prev_angle = None
+
+    @staticmethod
+    def _center(hand):
+        return np.mean(np.asarray(hand)[[0, 5, 9, 13, 17], :2], axis=0)
+
+    def update(self, hands):
+        if not self.inspecting or not hands:
+            self._clear_motion()
+            return self.state()
+
+        centers = [self._center(hand) for hand in hands[:2]]
+        if len(centers) == 1:
+            c = centers[0]
+            if self._prev_one is not None:
+                dx, dy = c - self._prev_one
+                self.rotation[1] += float(dx) * 4.0
+                self.rotation[0] += float(dy) * 4.0
+            self._prev_one = c.copy()
+            self._prev_mid = self._prev_dist = self._prev_angle = None
+            return self.state()
+
+        a, b = centers
+        mid = (a + b) * 0.5
+        delta = b - a
+        dist = max(float(np.linalg.norm(delta)), 1e-5)
+        angle = math.atan2(float(delta[1]), float(delta[0]))
+        if self._prev_mid is not None:
+            mdx, mdy = mid - self._prev_mid
+            self.pan[0] += float(mdx) * 2.5
+            self.pan[1] -= float(mdy) * 2.5
+        if self._prev_dist is not None:
+            self.zoom = float(np.clip(self.zoom * (1.0 + (dist - self._prev_dist) * 2.5), 0.45, 2.8))
+        if self._prev_angle is not None:
+            delta_angle = math.atan2(math.sin(angle - self._prev_angle), math.cos(angle - self._prev_angle))
+            self.rotation[2] += float(delta_angle)
+        self._prev_mid = mid.copy()
+        self._prev_dist = dist
+        self._prev_angle = angle
+        self._prev_one = None
+        return self.state()
+
+    def state(self):
+        return {
+            "inspecting": self.inspecting,
+            "solid": self.solid,
+            "rotation": [round(v, 5) for v in self.rotation],
+            "pan": [round(v, 5) for v in self.pan],
+            "zoom": round(self.zoom, 5),
+        }

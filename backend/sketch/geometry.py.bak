@@ -1,0 +1,218 @@
+"""Validated multi-component contour -> extruded mesh geometry."""
+from __future__ import annotations
+
+import numpy as np
+
+
+def _cross(a, b, c):
+    return float((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+
+
+def _on_segment(a, b, p, eps=1e-7):
+    return (
+        min(a[0], b[0]) - eps <= p[0] <= max(a[0], b[0]) + eps
+        and min(a[1], b[1]) - eps <= p[1] <= max(a[1], b[1]) + eps
+        and abs(_cross(a, b, p)) <= eps
+    )
+
+
+def _segments_intersect(a, b, c, d, eps=1e-7):
+    ab1, ab2 = _cross(a, b, c), _cross(a, b, d)
+    cd1, cd2 = _cross(c, d, a), _cross(c, d, b)
+    if ((ab1 > eps > ab2) or (ab2 > eps > ab1)) and ((cd1 > eps > cd2) or (cd2 > eps > cd1)):
+        return True
+    return _on_segment(a, b, c, eps) or _on_segment(a, b, d, eps) or _on_segment(c, d, a, eps) or _on_segment(c, d, b, eps)
+
+
+def has_self_intersection(points):
+    pts = np.asarray(points, dtype=float)
+    n = len(pts)
+    if n < 4:
+        return False
+    for i in range(n):
+        a, b = pts[i], pts[(i + 1) % n]
+        for j in range(i + 1, n):
+            if j == i + 1 or (i == 0 and j == n - 1):
+                continue
+            if _segments_intersect(a, b, pts[j], pts[(j + 1) % n]):
+                return True
+    return False
+
+
+def polygon_area(points):
+    pts = np.asarray(points, dtype=float)
+    return 0.5 * float(np.sum(pts[:, 0] * np.roll(pts[:, 1], -1) - pts[:, 1] * np.roll(pts[:, 0], -1)))
+
+
+def _dedupe(points, min_step):
+    pts = np.asarray(points, dtype=np.float32)
+    if len(pts) == 0:
+        return pts
+    keep = [0]
+    threshold2 = float(min_step) ** 2
+    for i in range(1, len(pts)):
+        if float(np.sum((pts[i] - pts[keep[-1]]) ** 2)) >= threshold2:
+            keep.append(i)
+    return pts[keep]
+
+
+def resample_closed(points, count=96):
+    pts = np.asarray(points, dtype=float)
+    if len(pts) < 3:
+        return None
+    if np.linalg.norm(pts[0] - pts[-1]) < 1e-6:
+        pts = pts[:-1]
+    if len(pts) < 3:
+        return None
+    closed = np.vstack([pts, pts[0]])
+    lengths = np.linalg.norm(np.diff(closed, axis=0), axis=1)
+    total = float(lengths.sum())
+    if total <= 1e-8:
+        return None
+    distances = np.concatenate([[0.0], np.cumsum(lengths)])
+    targets = np.linspace(0.0, total, int(count), endpoint=False)
+    return np.column_stack((
+        np.interp(targets, distances, closed[:, 0]),
+        np.interp(targets, distances, closed[:, 1]),
+    ))
+
+
+def smooth_closed(points, radius=1):
+    pts = np.asarray(points, dtype=np.float32)
+    if len(pts) < 5 or radius <= 0:
+        return pts.copy()
+    out = np.empty_like(pts)
+    for i in range(len(pts)):
+        idx = [(i + j) % len(pts) for j in range(-radius, radius + 1)]
+        out[i] = pts[idx].mean(axis=0)
+    return out
+
+
+def _clean_stroke(stroke, min_points, close_snap_distance, min_component_area, aspect):
+    pts = _dedupe(stroke, min_step=0.0015)
+    if len(pts) < min_points:
+        return None, "too_short"
+
+    gap = np.linalg.norm((pts[0] - pts[-1]) * np.array([aspect, 1.0]))
+    if gap > close_snap_distance:
+        return None, f"open:{gap:.3f}/{close_snap_distance:.3f}"
+    # Do not retain a duplicated first/last point during intersection tests;
+    # the closing edge is implicit in the polygon representation.
+    if np.linalg.norm(pts[0] - pts[-1]) < 1e-6:
+        pts = pts[:-1]
+
+    if has_self_intersection(pts):
+        return None, "self_intersection"
+
+    area = abs(polygon_area(pts))
+    if area < min_component_area:
+        return None, "degenerate"
+
+    return pts, "ok"
+
+
+def build_3d_shape(strokes, resample_points=96, aspect=1.0, min_points=15,
+                   close_snap_distance=0.035, min_component_area=0.0015):
+    """Validate each stroke independently and return normalized closed outlines."""
+    components = []
+    problems = []
+    for index, stroke in enumerate(strokes):
+        if len(stroke) < min_points:
+            continue
+        cleaned, status = _clean_stroke(
+            stroke, min_points, close_snap_distance, min_component_area, aspect
+        )
+        if status != "ok":
+            problems.append((index, status))
+            continue
+        outline = resample_closed(cleaned, resample_points)
+        if outline is None:
+            problems.append((index, "resample_failed"))
+            continue
+        components.append(smooth_closed(outline))
+
+    if not components:
+        return None, problems or [(0, "no_valid_closed_stroke")]
+    # Erasing can legitimately leave short/open fragments behind. They are not
+    # model components and should not invalidate an otherwise valid closed shape.
+    # Only fail when there is no valid component at all.
+
+    # Convert image-space y-down to model-space y-up once, then normalize all
+    # components against the same bounding box so disconnected shapes preserve
+    # their relative placement.
+    model_components = []
+    all_points = []
+    for component in components:
+        c = component.astype(np.float32).copy()
+        c[:, 0] *= float(aspect)
+        c[:, 1] *= -1.0
+        model_components.append(c)
+        all_points.append(c)
+
+    combined = np.vstack(all_points)
+    minimum = combined.min(axis=0)
+    maximum = combined.max(axis=0)
+    center = (minimum + maximum) * 0.5
+    span = max(float((maximum - minimum).max()), 1e-6)
+    normalized = [((component - center) / span).astype(np.float32) for component in model_components]
+    return normalized, []
+
+
+def _point_in_triangle(p, a, b, c):
+    c1, c2, c3 = _cross(a, b, p), _cross(b, c, p), _cross(c, a, p)
+    return not ((c1 < -1e-8 or c2 < -1e-8 or c3 < -1e-8) and (c1 > 1e-8 or c2 > 1e-8 or c3 > 1e-8))
+
+
+def triangulate(polygon):
+    pts = np.asarray(polygon, dtype=float)
+    if len(pts) < 3:
+        return []
+    indices = list(range(len(pts)))
+    if polygon_area(pts) < 0:
+        indices.reverse()
+    triangles = []
+    guard = 0
+    while len(indices) > 3 and guard < len(pts) * len(pts):
+        guard += 1
+        found = False
+        m = len(indices)
+        for k in range(m):
+            ia, ib, ic = indices[(k - 1) % m], indices[k], indices[(k + 1) % m]
+            a, b, c = pts[ia], pts[ib], pts[ic]
+            if _cross(a, b, c) <= 1e-8:
+                continue
+            if any(j not in (ia, ib, ic) and _point_in_triangle(pts[j], a, b, c) for j in indices):
+                continue
+            triangles.append((ia, ib, ic))
+            del indices[k]
+            found = True
+            break
+        if not found:
+            return []
+    if len(indices) == 3:
+        triangles.append(tuple(indices))
+    return triangles
+
+
+def build_mesh(outlines, height=0.6):
+    """Triangulate and extrude all normalized outlines for optional backend export."""
+    vertices, faces = [], []
+    for outline in outlines:
+        polygon = np.asarray(outline, dtype=np.float32)
+        triangles = triangulate(polygon)
+        if not triangles:
+            continue
+        base = len(vertices)
+        n = len(polygon)
+        vertices.extend([(float(x), float(y), 0.0) for x, y in polygon])
+        vertices.extend([(float(x), float(y), float(height)) for x, y in polygon])
+        for a, b, c in triangles:
+            faces.append((base + a, base + c, base + b))
+            faces.append((base + n + a, base + n + b, base + n + c))
+        for i in range(n):
+            j = (i + 1) % n
+            faces.append((base + i, base + j, base + n + j))
+            faces.append((base + i, base + n + j, base + n + i))
+    if not vertices:
+        raise ValueError("No triangulatable outline was found.")
+    return np.asarray(vertices, dtype=np.float32), faces

@@ -1,0 +1,22 @@
+import cv2, time, platform
+
+class Camera:
+    def __init__(self,index=0,width=960,height=540,mirror=True):
+        self.index=index; self.width=width; self.height=height; self.mirror=mirror; self.cap=None; self.last_time=time.perf_counter(); self.fps=0.0
+    def open(self):
+        if self.cap is not None and self.cap.isOpened(): return True
+        backend = cv2.CAP_DSHOW if platform.system() == 'Windows' else 0
+        self.cap=cv2.VideoCapture(self.index, backend)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,self.width); self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT,self.height)
+        return bool(self.cap.isOpened())
+    def read(self):
+        if not self.open(): return None
+        ok,frame=self.cap.read()
+        if not ok: return None
+        now=time.perf_counter(); dt=now-self.last_time; self.last_time=now
+        if dt>0: self.fps=0.9*self.fps+0.1*(1/dt) if self.fps else 1/dt
+        if self.mirror: frame=cv2.flip(frame,1)
+        return frame
+    def release(self):
+        if self.cap is not None: self.cap.release()
+        self.cap=None

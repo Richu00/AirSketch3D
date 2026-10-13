@@ -1,0 +1,68 @@
+import type { Mode } from '../types';
+
+export const GESTURE_META: Record<string, { emoji: string; label: string }> = {
+  NONE: { emoji: '·', label: 'No hand' },
+  UNKNOWN: { emoji: '❔', label: 'Unknown' },
+  INDEX_POINT: { emoji: '☝️', label: 'Index point' },
+  VERTICAL_SCROLL: { emoji: '↕️', label: 'Scroll' },
+  PINCH: { emoji: '🤏', label: 'Pinch' },
+  FIST: { emoji: '✊', label: 'Fist' },
+  OPEN_PALM: { emoji: '🖐️', label: 'Open palm' },
+  PEACE: { emoji: '✌️', label: 'Peace' },
+  THUMBS_UP: { emoji: '👍', label: 'Thumbs up' },
+  THUMBS_DOWN: { emoji: '👎', label: 'Thumbs down' },
+  SCREENSHOT: { emoji: '🤟', label: 'Screenshot' },
+  SWIPE_LEFT: { emoji: '👈', label: 'Swipe left' },
+  SWIPE_RIGHT: { emoji: '👉', label: 'Swipe right' },
+  DRAW: { emoji: '☝️', label: 'Draw' },
+  ERASE: { emoji: '✌️', label: 'Erase' },
+  PAUSE: { emoji: '🖐️', label: 'Pause' },
+  OTHER: { emoji: '✋', label: 'Other' },
+};
+
+export const gestureMeta = (g: string) => GESTURE_META[g] ?? { emoji: '✋', label: g.replace(/_/g, ' ') };
+
+export interface GuideRow { gesture: string; action: string }
+
+export const MODE_GUIDE: Record<Mode, GuideRow[]> = {
+  DESKTOP: [
+    { gesture: 'INDEX_POINT', action: 'Move cursor' },
+    { gesture: 'PINCH', action: 'Click / select' },
+    { gesture: 'FIST', action: 'Left click' },
+    { gesture: 'VERTICAL_SCROLL', action: 'Scroll' },
+    { gesture: 'OPEN_PALM', action: 'Activate / resume' },
+    { gesture: 'PEACE', action: 'Browser mode' },
+    { gesture: 'THUMBS_UP', action: 'App launcher' },
+    { gesture: 'SCREENSHOT', action: 'Screenshot' },
+    { gesture: 'THUMBS_DOWN', action: 'Pause control' },
+  ],
+  BROWSER: [
+    { gesture: 'INDEX_POINT', action: 'Move cursor' },
+    { gesture: 'PINCH', action: 'Select / click' },
+    { gesture: 'SWIPE_LEFT', action: 'Back' },
+    { gesture: 'SWIPE_RIGHT', action: 'Forward' },
+    { gesture: 'SCREENSHOT', action: 'Screenshot' },
+    { gesture: 'THUMBS_DOWN', action: 'Exit browser mode' },
+  ],
+  APPS: [
+    { gesture: 'INDEX_POINT', action: 'Hover an app' },
+    { gesture: 'PINCH', action: 'Launch hovered app' },
+    { gesture: 'THUMBS_DOWN', action: 'Close launcher' },
+  ],
+  SKETCH: [
+    { gesture: 'INDEX_POINT', action: '1 finger · draw' },
+    { gesture: 'PEACE', action: '2 fingers · erase' },
+    { gesture: 'OPEN_PALM', action: '5 fingers · pause' },
+    { gesture: 'FIST', action: 'Hold fist · make 3D model' },
+    { gesture: 'SCREENSHOT', action: 'Screenshot' },
+    { gesture: 'THUMBS_DOWN', action: 'Exit sketch mode' },
+  ],
+  MEDIA: [
+    { gesture: 'OPEN_PALM', action: 'Play / resume' },
+    { gesture: 'FIST', action: 'Pause' },
+    { gesture: 'SWIPE_LEFT', action: 'Previous track' },
+    { gesture: 'SWIPE_RIGHT', action: 'Next track' },
+    { gesture: 'THUMBS_UP', action: 'Volume up' },
+    { gesture: 'THUMBS_DOWN', action: 'Volume down · hold = exit' },
+  ],
+};

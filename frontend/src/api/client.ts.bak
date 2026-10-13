@@ -1,0 +1,42 @@
+import { Settings, LaunchResult } from '../types';
+import { API_BASE as BASE } from '../config';
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export const getStatus = () => request('/status');
+export const getConfig = () => request<Settings>('/config');
+export const updateConfig = (settings: Settings) =>
+  request<Settings>('/config', { method: 'POST', body: JSON.stringify(settings) });
+
+export const startTracking = () => request('/start', { method: 'POST' });
+export const stopTracking = () => request('/stop', { method: 'POST' });
+export const emergencyStop = () => request('/emergency-stop', { method: 'POST' });
+
+export const switchMode = (mode: string) =>
+  request('/mode', { method: 'POST', body: JSON.stringify({ mode }) });
+
+export const launchApp = (name: string) =>
+  request<LaunchResult>('/launch-app', { method: 'POST', body: JSON.stringify({ name }) });
+
+export const openWebsite = (url: string) =>
+  request('/open-website', { method: 'POST', body: JSON.stringify({ url }) });
+
+export const getApplications = () =>
+  request<{ applications: { name: string; path: string; icon: string; gesture: string | null }[] }>('/applications');
+
+export const getWebsites = () =>
+  request<{ websites: { name: string; url: string; icon: string; gesture: string | null }[] }>('/websites');
+
+export const sketchClear = () => request('/sketch/clear', { method: 'POST' });
+export const sketchUndo = () => request('/sketch/undo', { method: 'POST' });
+export const sketchGenerate = () => request<{ success: boolean; message: string }>('/sketch/generate', { method: 'POST' });

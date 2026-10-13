@@ -1,0 +1,327 @@
+"""Robust, pinch-free Sketch gesture recognition.
+
+Continuous sketch poses (DRAW/ERASE/PAUSE/FIST) are deliberately low-latency:
+they are allowed to follow the current geometric classification immediately.
+Deliberate commands (PALM_LEFT and sideways/vertical thumbs) use a short
+temporal lock so accidental single frames do not trigger commands.
+"""
+from collections import deque
+import numpy as np
+
+FINGER_CHAINS = ((5, 6, 7, 8), (9, 10, 11, 12), (13, 14, 15, 16), (17, 18, 19, 20))
+
+
+def _angle(a, b, c):
+    u = np.asarray(a, dtype=np.float32)[:2] - np.asarray(b, dtype=np.float32)[:2]
+    v = np.asarray(c, dtype=np.float32)[:2] - np.asarray(b, dtype=np.float32)[:2]
+    nu = max(float(np.linalg.norm(u)), 1e-6)
+    nv = max(float(np.linalg.norm(v)), 1e-6)
+    return float(np.degrees(np.arccos(np.clip(float(np.dot(u, v) / (nu * nv)), -1.0, 1.0))))
+
+
+def _clip(v, lo=0.0, hi=1.0):
+    return max(lo, min(hi, float(v)))
+
+
+def _distance(a, b, aspect=1.0):
+    d = (np.asarray(a, dtype=np.float32)[:2] - np.asarray(b, dtype=np.float32)[:2]).copy()
+    d[0] *= float(aspect or 1.0)
+    return float(np.linalg.norm(d))
+
+
+def _finger_evidence(hand, chain, aspect=1.0):
+    mcp, pip, dip, tip = chain
+    pip_angle = _angle(hand[mcp], hand[pip], hand[dip])
+    dip_angle = _angle(hand[pip], hand[dip], hand[tip])
+    wrist = hand[0, :2]
+    tip_wrist = _distance(hand[tip], wrist, aspect)
+    pip_wrist = max(_distance(hand[pip], wrist, aspect), 1e-6)
+    reach = tip_wrist / pip_wrist
+    angle_score = min((pip_angle - 128.0) / 27.0, (dip_angle - 122.0) / 28.0)
+    reach_score = (reach - 1.04) / 0.18
+    score = 0.62 * angle_score + 0.38 * reach_score
+    if score >= 0.48:
+        state = "E"
+    elif score <= 0.12:
+        state = "F"
+    else:
+        state = None
+    return state, max(0.0, min(1.0, score)), pip_angle, dip_angle, reach
+
+
+def finger_states(hand, aspect=1.0):
+    hand = np.asarray(hand, dtype=np.float32)
+    if hand.shape != (21, 3):
+        return np.zeros(4, dtype=bool)
+    return np.asarray([_finger_evidence(hand, c, aspect)[0] == "E" for c in FINGER_CHAINS], dtype=bool)
+
+
+def _thumb_direction(hand, aspect=1.0):
+    a, b = hand[2, :2], hand[4, :2]
+    v = (b - a).astype(np.float32)
+    v[0] *= float(aspect or 1.0)
+    n = max(float(np.linalg.norm(v)), 1e-6)
+    return float(v[0] / n), float(-v[1] / n)
+
+
+def _palm_direction(hand, aspect=1.0):
+    wrist = hand[0, :2]
+    vecs = []
+    for idx in (8, 12, 16, 20):
+        v = (hand[idx, :2] - wrist).astype(np.float32)
+        v[0] *= float(aspect or 1.0)
+        n = float(np.linalg.norm(v))
+        if n > 1e-5:
+            vecs.append(v / n)
+    if not vecs:
+        return 0.0, 0.0
+    v = np.mean(vecs, axis=0)
+    n = max(float(np.linalg.norm(v)), 1e-6)
+    return float(v[0] / n), float(-v[1] / n)
+
+
+def _confidence(values):
+    values = [float(v) for v in values if v is not None]
+    return _clip(np.mean(values) if values else 0.0)
+
+
+def classify_pose_confidence(hand, aspect=1.0):
+    if len(hand) != 21:
+        return "NONE", 0.0
+    hand = np.asarray(hand, dtype=np.float32)
+    ev = [_finger_evidence(hand, c, aspect) for c in FINGER_CHAINS]
+    states = [x[0] for x in ev]
+    scores = [x[1] for x in ev]
+    index, middle, ring, pinky = states
+    palm = max(_distance(hand[0], hand[9], aspect), 1e-6)
+    thumb_ratio = _distance(hand[4], hand[17], aspect) / palm
+    tx, ty = _thumb_direction(hand, aspect)
+    px, py = _palm_direction(hand, aspect)
+
+    # Fist/thumb commands: require a clearly separated thumb. A curled thumb
+    # on a fist therefore remains FIST instead of becoming a thumb command.
+    if all(s == "F" for s in states):
+        if abs(tx) >= 0.78 and abs(tx) >= abs(ty) * 1.15:
+            return ("THUMBS_RIGHT" if tx > 0 else "THUMBS_LEFT"), _confidence([abs(tx), 1.0 - abs(ty)])
+        if thumb_ratio >= 0.90 and ty >= 0.72:
+            return "THUMBS_UP", _confidence([ty, _clip((thumb_ratio - .90) / .5), *[1 - s for s in scores]])
+        if thumb_ratio >= 0.90 and ty <= -0.72:
+            return "THUMBS_DOWN", _confidence([-ty, _clip((thumb_ratio - .90) / .5), *[1 - s for s in scores]])
+        return "FIST", _confidence([1.0 - abs(tx) * .35, 1.0 - abs(ty) * .35, *[1 - s for s in scores]])
+
+    if sum(s == "E" for s in states) >= 3:
+        if px <= -0.78 and -px >= abs(py) * 1.25:
+            return "PALM_LEFT", _confidence([abs(px), 1.0 - abs(py), *scores])
+        return "PAUSE", _confidence([*scores, _clip((thumb_ratio - .55) / .45)])
+
+    if index == "E" and middle == "E" and ring == "F" and pinky == "F":
+        return "ERASE", _confidence([scores[0], scores[1], 1 - scores[2], 1 - scores[3]])
+    if index == "E" and middle == "F" and ring == "F" and pinky == "F":
+        return "DRAW", _confidence([scores[0], 1 - scores[1], 1 - scores[2], 1 - scores[3]])
+    return "OTHER", 0.0
+
+
+def classify_pose(hand, aspect=1.0):
+    return classify_pose_confidence(hand, aspect)[0]
+
+
+def is_fist(hand, aspect=1.0):
+    return classify_pose(hand, aspect) == "FIST"
+
+
+class SketchGestureRecognizer:
+    # Only these commands need temporal confirmation. Continuous sketch
+    # gestures must not wait 4-5 frames before drawing/erasing.
+    SPECIAL = {"PALM_LEFT", "THUMBS_LEFT", "THUMBS_RIGHT", "THUMBS_UP", "THUMBS_DOWN"}
+    CONTINUOUS = {"DRAW", "ERASE", "PAUSE", "FIST"}
+
+    def __init__(self, params=None, aspect=1.0, history=7, hold_frames=3):
+        self.aspect = float(aspect or 1.0)
+        self.history_size = max(5, int(history))
+        self.hold_frames = max(2, int(hold_frames))
+        self.reset()
+
+    def configure(self, params=None, aspect=None, history=None, hold_frames=None):
+        if aspect is not None:
+            self.aspect = float(aspect or 1.0)
+        if history is not None:
+            self.history_size = max(5, int(history))
+        if hold_frames is not None:
+            self.hold_frames = max(2, int(hold_frames))
+        self.reset()
+
+    def reset(self):
+        self.history = deque(maxlen=getattr(self, "history_size", 7))
+        self.stable = "OTHER"
+        self._candidate = None
+        self._candidate_frames = 0
+        self._release_frames = 0
+        self._smoothed = None
+        self.debug = {
+            "raw": "OTHER", "stable": "OTHER", "confidence": 0.0,
+            "candidate": "", "candidate_frames": 0, "required_frames": 0,
+            "locked": False, "quality": 0.0, "finger_states": [],
+            "finger_scores": [], "palm_axis": [0.0, 0.0], "history": [],
+        }
+
+    def _quality(self, points):
+        palm = _distance(points[0], points[9], self.aspect)
+        return _clip((palm - 0.018) / 0.055) if palm >= 1e-4 else 0.0
+
+    def classify(self, points, now=None):
+        points = np.asarray(points, dtype=np.float32)
+        if points.shape != (21, 3):
+            self.reset()
+            return "NONE", 0.0
+
+        if self._smoothed is None:
+            self._smoothed = points.copy()
+        else:
+            motion = _distance(points[8], self._smoothed[8], self.aspect)
+            palm = max(_distance(points[0], points[9], self.aspect), 1e-5)
+            relative_motion = motion / palm
+            # Keep deliberate motion responsive while retaining enough smoothing
+            # to suppress camera/landmark jitter.  A higher alpha than V8 also
+            # keeps drawn circles geometrically faithful for 3D closure.
+            alpha = 0.90 if relative_motion > 0.16 else (0.76 if relative_motion < 0.045 else 0.84)
+            self._smoothed = (1.0 - alpha) * self._smoothed + alpha * points
+
+        raw, confidence = classify_pose_confidence(self._smoothed, self.aspect)
+        direct_raw, direct_conf = classify_pose_confidence(points, self.aspect)
+        # FIST starts a timed build gesture. Do not let landmark EMA delay its
+        # onset: the engine itself enforces the required hold duration.
+        if direct_raw == "FIST":
+            raw, confidence = direct_raw, direct_conf
+        self.history.append(raw)
+
+        # Priority rules:
+        #   * PALM_LEFT / thumbs are deliberate commands and remain locked through
+        #     a transient DRAW/ERASE/PAUSE/FIST frame.
+        #   * FIST is immediate once stable, because the SketchEngine owns the
+        #     actual hold-to-build timer.
+        #   * DRAW/ERASE/PAUSE need two consecutive frames when entering, which
+        #     rejects isolated noisy index/peace/open-palm frames without making
+        #     an established stroke sluggish.
+        output = self.stable
+
+        if self.stable in self.SPECIAL:
+            if raw == self.stable:
+                self._release_frames = 0
+                self._candidate = None
+                self._candidate_frames = 0
+                output = self.stable
+            elif raw in self.SPECIAL:
+                self._release_frames = 0
+                if raw == self._candidate:
+                    self._candidate_frames += 1
+                else:
+                    self._candidate = raw
+                    self._candidate_frames = 1
+                if self._candidate_frames >= 2:
+                    self.stable = raw
+                    self._candidate = None
+                    self._candidate_frames = 0
+                output = self.stable
+            elif raw in self.CONTINUOUS:
+                # Keep a deliberate command through one noisy frame, but release
+                # it after two consecutive genuine continuous-pose frames. This
+                # permits PALM_LEFT to be used again after the hand is lowered.
+                self._candidate = None
+                self._candidate_frames = 0
+                self._release_frames += 1
+                if self._release_frames >= 2:
+                    self.stable = "OTHER"
+                    self._release_frames = 0
+                    output = raw if raw == "FIST" else "OTHER"
+                else:
+                    output = self.stable
+            else:
+                self._release_frames += 1
+                self._candidate = None
+                self._candidate_frames = 0
+                if self._release_frames >= 2:
+                    self.stable = "OTHER"
+                    self._release_frames = 0
+                    output = "OTHER"
+                else:
+                    output = self.stable
+
+        elif raw == "FIST":
+            # Fist is the build gesture.  It is safe to enter immediately because
+            # SketchEngine requires the configured hold duration before generation.
+            self.stable = "FIST"
+            self._candidate = None
+            self._candidate_frames = 0
+            self._release_frames = 0
+            output = "FIST"
+
+        elif raw in ("DRAW", "ERASE", "PAUSE"):
+            if self.stable == raw:
+                self._candidate = None
+                self._candidate_frames = 0
+                self._release_frames = 0
+                output = raw
+            else:
+                if raw == self._candidate:
+                    self._candidate_frames += 1
+                else:
+                    self._candidate = raw
+                    self._candidate_frames = 1
+                self._release_frames = 0
+                if self._candidate_frames >= 2:
+                    self.stable = raw
+                    self._candidate = None
+                    self._candidate_frames = 0
+                    output = raw
+                else:
+                    # Keep an established continuous gesture alive for one
+                    # ambiguous transition frame; otherwise remain OTHER.
+                    output = self.stable if self.stable in self.CONTINUOUS else "OTHER"
+
+        elif raw in self.SPECIAL:
+            if raw == self._candidate:
+                self._candidate_frames += 1
+            else:
+                self._candidate = raw
+                self._candidate_frames = 1
+            self._release_frames = 0
+            if self._candidate_frames >= 2:
+                self.stable = raw
+                self._candidate = None
+                self._candidate_frames = 0
+            output = self.stable if self.stable != "OTHER" else "OTHER"
+
+        else:
+            self._candidate = None
+            self._candidate_frames = 0
+            if self.stable in self.CONTINUOUS:
+                self._release_frames += 1
+                output = self.stable
+                if self._release_frames >= 2:
+                    self.stable = "OTHER"
+                    self._release_frames = 0
+                    output = "OTHER"
+            else:
+                self._release_frames = 0
+                output = self.stable if self.stable in self.SPECIAL else "OTHER"
+
+        ev = [_finger_evidence(self._smoothed, c, self.aspect) for c in FINGER_CHAINS]
+        px, py = _palm_direction(self._smoothed, self.aspect)
+        required = 2 if self._candidate else 0
+        shown_conf = max(confidence, direct_conf if raw == "OTHER" else confidence)
+        self.debug = {
+            "raw": raw,
+            "stable": self.stable,
+            "confidence": round(float(shown_conf), 3),
+            "candidate": self._candidate or "",
+            "candidate_frames": int(self._candidate_frames),
+            "required_frames": required,
+            "locked": self.stable not in ("OTHER", "NONE"),
+            "quality": round(self._quality(self._smoothed), 3),
+            "finger_states": [e[0] or "?" for e in ev],
+            "finger_scores": [round(float(e[1]), 2) for e in ev],
+            "palm_axis": [round(px, 3), round(py, 3)],
+            "history": list(self.history),
+        }
+        return output, float(shown_conf)
+

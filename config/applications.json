@@ -1,0 +1,39 @@
+{
+  "applications": [
+    {
+      "name": "Chrome",
+      "path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "icon": "chrome",
+      "gesture": null,
+      "mac": "open -a 'Google Chrome'"
+    },
+    {
+      "name": "VS Code",
+      "path": "C:\\Users\\%USERNAME%\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+      "icon": "code",
+      "gesture": null,
+      "mac": "open -a 'Visual Studio Code'"
+    },
+    {
+      "name": "Calculator",
+      "path": "calc.exe",
+      "icon": "calculator",
+      "gesture": null,
+      "mac": "open -a Calculator"
+    },
+    {
+      "name": "Notepad",
+      "path": "notepad.exe",
+      "icon": "notepad",
+      "gesture": null,
+      "mac": "open -a TextEdit"
+    },
+    {
+      "name": "File Explorer",
+      "path": "explorer.exe",
+      "icon": "folder",
+      "gesture": null,
+      "mac": "open ~"
+    }
+  ]
+}

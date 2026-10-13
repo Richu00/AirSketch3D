@@ -1,0 +1,7 @@
+{"websites":[
+  {"name":"Google","url":"https://www.google.com","icon":"search","gesture":null},
+  {"name":"YouTube","url":"https://www.youtube.com","icon":"youtube","gesture":"PEACE"},
+  {"name":"GitHub","url":"https://github.com","icon":"github","gesture":null},
+  {"name":"ChatGPT","url":"https://chatgpt.com","icon":"sparkles","gesture":null},
+  {"name":"Gmail","url":"https://mail.google.com","icon":"mail","gesture":null}
+]}

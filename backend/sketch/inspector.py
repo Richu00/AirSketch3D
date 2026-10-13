@@ -1,0 +1,112 @@
+"""Stateful hand-controlled 3D inspection for Sketch mode."""
+from __future__ import annotations
+import math
+import numpy as np
+
+
+class SketchInspector:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.inspecting = False
+        self.solid = False
+        self.rotation = [0.0, 0.0, 0.0]
+        self.pan = [0.0, 0.0]
+        self.zoom = 1.0
+        self._prev_one = None
+        self._prev_mid = None
+        self._prev_dist = None
+        self._prev_angle = None
+        self._smooth_centers = []
+
+    def reset_view(self):
+        """Back to the default rotation / pan / zoom without leaving inspect mode."""
+        self.rotation = [0.0, 0.0, 0.0]
+        self.pan = [0.0, 0.0]
+        self.zoom = 1.0
+        self._clear_motion()
+        return self.state()
+
+    def enter(self):
+        self.inspecting = True
+        self._clear_motion()
+        return self.inspecting
+
+    def exit(self):
+        self.inspecting = False
+        self._clear_motion()
+        return self.inspecting
+
+    def _clear_motion(self):
+        self._prev_one = self._prev_mid = self._prev_dist = self._prev_angle = None
+        self._smooth_centers = []
+
+    @staticmethod
+    def _center(hand):
+        h = np.asarray(hand, dtype=np.float32)
+        return np.mean(h[[0, 5, 9, 13, 17], :2], axis=0)
+
+    def _centers(self, hands):
+        raw = [self._center(hand) for hand in hands[:2]]
+        if not raw:
+            self._smooth_centers = []
+            return []
+        alpha = 0.55
+        if len(self._smooth_centers) != len(raw):
+            self._smooth_centers = [c.copy() for c in raw]
+        else:
+            self._smooth_centers = [prev * (1.0 - alpha) + cur * alpha for prev, cur in zip(self._smooth_centers, raw)]
+        return [c.copy() for c in self._smooth_centers]
+
+    def update(self, hands):
+        if not self.inspecting or not hands:
+            self._clear_motion()
+            return self.state()
+
+        centers = self._centers(hands)
+        if len(centers) == 1:
+            c = centers[0]
+            if self._prev_one is not None:
+                dx, dy = c - self._prev_one
+                # Ignore sub-pixel jitter and clamp large detector jumps.
+                dx = float(np.clip(dx, -0.08, 0.08))
+                dy = float(np.clip(dy, -0.08, 0.08))
+                if abs(dx) + abs(dy) > 0.003:
+                    self.rotation[1] += dx * 4.0
+                    self.rotation[0] += dy * 4.0
+            self._prev_one = c.copy()
+            self._prev_mid = self._prev_dist = self._prev_angle = None
+            return self.state()
+
+        a, b = centers[:2]
+        mid = (a + b) * 0.5
+        delta = b - a
+        dist = max(float(np.linalg.norm(delta)), 1e-5)
+        angle = math.atan2(float(delta[1]), float(delta[0]))
+        if self._prev_mid is not None:
+            mdx, mdy = mid - self._prev_mid
+            # Per-frame jumps are limited AND the total is clamped, so the model cannot drift out of the panel.
+            self.pan[0] = float(np.clip(self.pan[0] + float(np.clip(mdx, -0.08, 0.08)) * 2.5, -1.6, 1.6))
+            self.pan[1] = float(np.clip(self.pan[1] - float(np.clip(mdy, -0.08, 0.08)) * 2.5, -1.6, 1.6))
+        if self._prev_dist is not None:
+            scale = float(np.clip(1.0 + (dist - self._prev_dist) * 2.5, 0.94, 1.06))
+            self.zoom = float(np.clip(self.zoom * scale, 0.45, 2.8))
+        if self._prev_angle is not None:
+            delta_angle = math.atan2(math.sin(angle - self._prev_angle), math.cos(angle - self._prev_angle))
+            if abs(delta_angle) > 0.01:
+                self.rotation[2] += float(np.clip(delta_angle, -0.12, 0.12))
+        self._prev_mid = mid.copy()
+        self._prev_dist = dist
+        self._prev_angle = angle
+        self._prev_one = None
+        return self.state()
+
+    def state(self):
+        return {
+            "inspecting": self.inspecting,
+            "solid": self.solid,
+            "rotation": [round(v, 5) for v in self.rotation],
+            "pan": [round(v, 5) for v in self.pan],
+            "zoom": round(self.zoom, 5),
+        }

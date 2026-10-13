@@ -1,0 +1,254 @@
+"""AirSketch3D drawing engine integrated into AIRCONTROL.
+
+The engine is deliberately independent of camera/MediaPipe/UI code.  It owns
+strokes, closure detection, erasing, validation, resampling and 3D model data.
+Desktop/BROWSER pinch remains untouched; SKETCH mode never consumes pinch.
+"""
+from __future__ import annotations
+
+import numpy as np
+
+from backend.sketch.geometry import build_3d_shape
+
+DEFAULTS = {
+    "extrude_height": 0.6,
+    "fist_hold_ms": 700,
+    "erase_radius": 0.06,
+    "min_points": 15,
+    "resample_points": 96,
+    "min_step": 0.004,
+    "close_snap_distance": 0.05,
+    "min_component_area": 0.0015,
+}
+
+SKETCH_GESTURES = ("DRAW", "ERASE", "PAUSE", "FIST", "OTHER", "NONE")
+
+
+def _adaptive_close_distance(stroke, configured):
+    """Allow a small hand-drawing closure error without accepting open lines."""
+    pts = np.asarray(stroke, dtype=np.float32)
+    if len(pts) < 2:
+        return float(configured)
+    span = np.ptp(pts, axis=0)
+    diagonal = float(np.linalg.norm(span))
+    # 10% of the outline span is forgiving enough for camera jitter, but cap it
+    # so a genuinely open stroke still needs to be brought back near its start.
+    return max(float(configured), min(0.09, diagonal * 0.18))
+
+
+def build_outline(points, n=96, aspect=1.0):
+    """Backward-compatible single-outline helper used by older tests/tools."""
+    outlines, problems = build_3d_shape([points], resample_points=n, aspect=aspect)
+    if not outlines:
+        return None
+    return np.asarray(outlines[0], dtype=np.float32)
+
+
+class SketchEngine:
+    def __init__(self, aspect=16 / 9, params=None):
+        self.p = dict(DEFAULTS)
+        self.aspect = float(aspect) if aspect else 1.0
+        self.model = None
+        self._model_seq = 0
+        self.configure(params, aspect=aspect)
+        self.clear()
+
+    def configure(self, params=None, aspect=None):
+        for key, value in (params or {}).items():
+            if key in self.p and value is not None:
+                self.p[key] = value
+        if aspect:
+            self.aspect = float(aspect)
+
+    def clear(self, keep_model=False):
+        self.strokes: list[list[tuple[float, float]]] = [[]]
+        self.gesture = "NONE"
+        self._prev_gesture = "NONE"
+        self._fist_since = None
+        self._fist_done = False
+        self._warned = False
+        self._closed_current = False
+        self.version = getattr(self, "version", 0) + 1
+        if not keep_model:
+            self.model = None
+
+    @property
+    def point_count(self):
+        return sum(len(stroke) for stroke in self.strokes)
+
+    @property
+    def closed_stroke_count(self):
+        return sum(1 for stroke in self.strokes if self._is_closed(stroke))
+
+    def all_points(self):
+        return [point for stroke in self.strokes for point in stroke]
+
+    def _closure_distance(self, stroke):
+        return _adaptive_close_distance(stroke, self.p["close_snap_distance"])
+
+    def _is_closed(self, stroke):
+        if len(stroke) < self.p["min_points"]:
+            return False
+        dx = (stroke[0][0] - stroke[-1][0]) * self.aspect
+        dy = stroke[0][1] - stroke[-1][1]
+        limit = self._closure_distance(stroke)
+        return dx * dx + dy * dy <= limit ** 2
+
+    def _maybe_snap_closed(self, stroke):
+        if len(stroke) < self.p["min_points"]:
+            return False
+        if self._is_closed(stroke):
+            stroke[-1] = stroke[0]
+            return True
+        return False
+
+    def fist_progress(self, now=None):
+        if self._fist_since is None or now is None:
+            return 0.0
+        return max(0.0, min(1.0, (now - self._fist_since) * 1000.0 / self.p["fist_hold_ms"]))
+
+    def erase_near(self, x, y):
+        radius = float(self.p["erase_radius"])
+        radius2 = radius * radius
+        changed = False
+        rebuilt = []
+        for stroke in self.strokes:
+            segment = []
+            for px, py in stroke:
+                dx = (px - x) * self.aspect
+                dy = py - y
+                if dx * dx + dy * dy <= radius2:
+                    changed = True
+                    if segment:
+                        rebuilt.append(segment)
+                        segment = []
+                else:
+                    segment.append((px, py))
+            if segment:
+                rebuilt.append(segment)
+        if changed:
+            self.strokes = rebuilt + [[]]
+            self.version += 1
+        return changed
+
+    def undo_stroke(self):
+        nonempty = [stroke for stroke in self.strokes if stroke]
+        if not nonempty:
+            return False
+        nonempty.pop()
+        self.strokes = nonempty + [[]]
+        self.version += 1
+        return True
+
+    def generate(self):
+        if self.point_count < self.p["min_points"]:
+            return False, f"Draw more first ({self.point_count}/{self.p['min_points']} points)"
+
+        valid_strokes = []
+        for stroke in self.strokes:
+            if len(stroke) < self.p["min_points"]:
+                continue
+            candidate = list(stroke)
+            # Snap a nearly closed hand-drawn outline before geometry validation.
+            # This keeps geometry.py strict while making the interactive camera
+            # path tolerant of the final few pixels of hand jitter.
+            self._maybe_snap_closed(candidate)
+            valid_strokes.append(candidate)
+        if not valid_strokes:
+            return False, "Draw at least one closed outline"
+
+        outlines, problems = build_3d_shape(
+            valid_strokes,
+            resample_points=int(self.p["resample_points"]),
+            aspect=self.aspect,
+            min_points=int(self.p["min_points"]),
+            close_snap_distance=float(self.p["close_snap_distance"]),
+            min_component_area=float(self.p["min_component_area"]),
+        )
+        if not outlines:
+            if problems:
+                readable = ", ".join(f"stroke {i + 1}: {reason}" for i, reason in problems[:3])
+                return False, f"Close your outline before building ({readable})"
+            return False, "No valid closed outline found"
+
+        self._model_seq += 1
+        payload = [
+            [[round(float(x), 5), round(float(y), 5)] for x, y in outline]
+            for outline in outlines
+        ]
+        self.model = {
+            "id": self._model_seq,
+            "outlines": payload,
+            # Backwards compatibility for older frontend/API consumers.
+            "outline": payload[0],
+            "height": float(self.p["extrude_height"]),
+        }
+        self.version += 1
+        return True, "3D model generated" if len(payload) == 1 else f"3D model generated ({len(payload)} components)"
+
+    def update(self, gesture, tip, now):
+        gesture = gesture if gesture in SKETCH_GESTURES else "OTHER"
+        event = ""
+
+        if gesture == "DRAW" and tip is not None:
+            if self._prev_gesture != "DRAW" and self.strokes[-1]:
+                self.strokes.append([])
+                self._closed_current = False
+
+            current = self.strokes[-1]
+            point = (float(tip[0]), float(tip[1]))
+            if not current:
+                current.append(point)
+                self.version += 1
+            else:
+                dx = (point[0] - current[-1][0]) * self.aspect
+                dy = point[1] - current[-1][1]
+                if dx * dx + dy * dy >= float(self.p["min_step"]) ** 2:
+                    current.append(point)
+                    if self._maybe_snap_closed(current):
+                        self._closed_current = True
+                    self.version += 1
+
+        elif gesture == "ERASE" and tip is not None:
+            self.erase_near(float(tip[0]), float(tip[1]))
+
+        if gesture == "FIST":
+            if self._fist_since is None:
+                self._fist_since = now
+                self._fist_done = False
+                self._warned = False
+            if not self._fist_done and not self._warned and (now - self._fist_since) * 1000.0 >= self.p["fist_hold_ms"]:
+                ok, message = self.generate()
+                if ok:
+                    self._fist_done = True
+                else:
+                    self._warned = True
+                event = message
+        else:
+            self._fist_since = None
+            self._fist_done = False
+            self._warned = False
+
+        self.gesture = gesture
+        self._prev_gesture = gesture
+        return event
+
+    def state(self, now=None):
+        return {
+            "gesture": self.gesture,
+            "points": self.point_count,
+            "closed_strokes": self.closed_stroke_count,
+            "version": self.version,
+            "fist_progress": round(self.fist_progress(now), 3),
+            "erase_radius": self.p["erase_radius"],
+            "has_model": self.model is not None,
+            "model_id": self.model["id"] if self.model else 0,
+            "inspecting": False,
+        }
+
+    def strokes_payload(self):
+        return [
+            [[round(float(x), 4), round(float(y), 4)] for x, y in stroke]
+            for stroke in self.strokes
+            if stroke
+        ]

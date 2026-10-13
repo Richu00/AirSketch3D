@@ -1,0 +1,64 @@
+from backend.modes.manager import ModeManager
+from backend.sketch.recognition import SketchGestureRecognizer
+from backend.tests.hand_factory import pose
+from backend.tests.test_modes import FakeActions, APPS
+
+
+def sketch():
+    a = FakeActions(); m = ModeManager(a, lambda: APPS); m.set_mode("SKETCH")
+    return m, a
+
+
+def test_tap_of_thumbs_up_does_not_toggle():
+    m, _ = sketch()
+    assert m.handle_event("THUMBS_UP") == ""
+    assert m.tick("THUMBS_UP", 10.0) == "" and m.tick("THUMBS_UP", 10.3) == ""
+    assert m.sketch_control_mode == "DRAW"
+
+
+def test_held_thumbs_up_toggles_once_each_way():
+    m, _ = sketch()
+    m.tick("THUMBS_UP", 10.0)
+    assert m.tick("THUMBS_UP", 11.1) == "Sketch Mouse Control" and m.sketch_control_mode == "MOUSE"
+    assert m.tick("THUMBS_UP", 12.5) == ""                      # still held: no second toggle
+    m.tick("NONE", 13.0)
+    m.tick("THUMBS_UP", 14.0)
+    assert m.tick("THUMBS_UP", 15.1) == "Sketch Draw Control" and m.sketch_control_mode == "DRAW"
+
+
+def test_pinch_clicks_only_in_mouse_control():
+    m, a = sketch()
+    assert m.handle_event("PINCH") == "" and not a.calls
+    m.sketch_control_mode = "MOUSE"
+    assert m.handle_event("PINCH") == "Mouse Click" and a.calls == [("click",)]
+
+
+def test_leaving_sketch_resets_control_mode():
+    m, _ = sketch(); m.sketch_control_mode = "MOUSE"
+    assert m.handle_event("THUMBS_DOWN") == "Sketch Mode Exited" and m.mode == "DESKTOP"
+    m.set_mode("SKETCH")
+    assert m.sketch_control_mode == "DRAW"
+
+
+def test_one_noisy_frame_does_not_become_a_draw_point():
+    r = SketchGestureRecognizer(aspect=1.0)
+    seen = [r.classify(pose(n))[0] for n in ["FIST"] * 6 + ["INDEX_POINT"] + ["FIST"] * 3]
+    assert "DRAW" not in seen[6:]
+
+
+def test_pipeline_thumbs_up_hold_switches_to_mouse_and_blocks_drawing():
+    from backend.main import state
+    state.modes.paused = False; state.modes.set_mode("SKETCH"); state.apply_settings(); state.sketch.clear()
+    state.recognizer.aspect = 1.0; state.sketch.configure(aspect=1.0)
+    moves = []
+    state.actions.move_cursor = lambda *a, **k: moves.append(1)
+    state.actions.click = lambda: None
+    t = 500.0
+    for _ in range(50):                                          # ~1.6 s of thumbs-up
+        state.process(pose("THUMBS_UP"), t); t += 0.033
+    assert state.modes.sketch_control_mode == "MOUSE"
+    n = state.sketch.point_count
+    for _ in range(20):
+        state.process(pose("INDEX_POINT"), t); t += 0.033
+    assert state.sketch.point_count == n and moves               # cursor moves, nothing is drawn
+    state.modes.set_mode("DESKTOP"); state.sketch.clear()
